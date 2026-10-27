@@ -1,6 +1,7 @@
 /*
  * Openbeats Web — player store. React context over a single audio engine
- * instance; queue, recents, lyrics and resolution state live here.
+ * instance: queue (survives refresh), recents, liked songs, lyrics,
+ * media-session integration and next-track preloading.
  */
 
 import {
@@ -15,24 +16,43 @@ import {
 } from "react"
 import { audioEngine } from "./lib/audioEngine"
 import { fetchLyrics, type Lyrics } from "./lib/lyrics"
-import { resolveStream, type Track } from "./lib/innertube"
+import { invalidateStream, prefetchStream, resolveStreamCached, type Track } from "./lib/innertube"
 
 const RECENTS_KEY = "ob-recents"
+const LIKED_KEY = "ob-liked"
+const VOLUME_KEY = "ob-volume"
+const QUEUE_KEY = "ob-queue"
 
-function loadRecents(): Track[] {
+function loadJSON<T>(key: string, fallback: T): T {
   try {
-    const raw = localStorage.getItem(RECENTS_KEY)
-    return raw ? (JSON.parse(raw) as Track[]) : []
+    const raw = localStorage.getItem(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
   } catch {
-    return []
+    return fallback
   }
 }
 
-function saveRecents(tracks: Track[]) {
+function saveJSON(key: string, value: unknown) {
   try {
-    localStorage.setItem(RECENTS_KEY, JSON.stringify(tracks.slice(0, 14)))
+    localStorage.setItem(key, JSON.stringify(value))
   } catch {
     /* private mode */
+  }
+}
+
+function loadRecents(): Track[] {
+  return loadJSON<Track[]>(RECENTS_KEY, [])
+}
+
+function loadQueue(): { queue: Track[]; index: number } {
+  try {
+    const raw = sessionStorage.getItem(QUEUE_KEY)
+    if (!raw) return { queue: [], index: -1 }
+    const parsed = JSON.parse(raw) as { queue: Track[]; index: number }
+    if (!Array.isArray(parsed.queue) || !parsed.queue.length) return { queue: [], index: -1 }
+    return { queue: parsed.queue, index: Math.min(parsed.index, parsed.queue.length - 1) }
+  } catch {
+    return { queue: [], index: -1 }
   }
 }
 
@@ -46,9 +66,11 @@ interface PlayerState {
   resolving: string | null
   error: string | null
   recents: Track[]
+  liked: Track[]
   lyrics: Lyrics | null
   lyricsLoading: boolean
   volume: number
+  loaded: boolean // true once the current queue entry has a live stream
 }
 
 interface PlayerActions {
@@ -63,25 +85,41 @@ interface PlayerActions {
   prev: () => void
   seek: (t: number) => void
   setVolume: (v: number) => void
+  toggleLike: (track: Track) => void
+  isLiked: (videoId: string) => boolean
+  dismissError: () => void
 }
 
 const PlayerContext = createContext<(PlayerState & PlayerActions) | null>(null)
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
-  const [queue, setQueue] = useState<Track[]>([])
-  const [index, setIndex] = useState(-1)
+  const restored = useRef(loadQueue())
+  const [queue, setQueue] = useState<Track[]>(restored.current.queue)
+  const [index, setIndex] = useState(restored.current.index)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [resolving, setResolving] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [recents, setRecents] = useState<Track[]>(loadRecents)
+  const [liked, setLiked] = useState<Track[]>(() => loadJSON<Track[]>(LIKED_KEY, []))
   const [lyrics, setLyrics] = useState<Lyrics | null>(null)
   const [lyricsLoading, setLyricsLoading] = useState(false)
-  const [volume, setVolumeState] = useState(0.7)
+  const [volume, setVolumeState] = useState(() => {
+    const v = Number(localStorage.getItem(VOLUME_KEY) ?? "0.7")
+    return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.7
+  })
+  const [loaded, setLoaded] = useState(false)
 
   const current = index >= 0 && index < queue.length ? queue[index] : null
   const loadToken = useRef(0)
+  const preloaded = useRef<string | null>(null)
+
+  // restore volume on the element
+  useEffect(() => {
+    audioEngine.el.volume = volume
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(
     () => {
@@ -98,6 +136,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [],
   )
 
+  // persist queue so a refresh doesn't lose it
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(QUEUE_KEY, JSON.stringify({ queue, index }))
+    } catch {
+      /* ignore */
+    }
+  }, [queue, index])
+
   const loadIndex = useCallback(
     async (q: Track[], i: number) => {
       const track = q[i]
@@ -109,10 +156,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setCurrentTime(0)
       setDuration(0)
       setLyrics(null)
+      preloaded.current = null
 
       setRecents((prev) => {
         const next = [track, ...prev.filter((t) => t.videoId !== track.videoId)].slice(0, 14)
-        saveRecents(next)
+        saveJSON(RECENTS_KEY, next)
         return next
       })
 
@@ -127,13 +175,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       })
 
       try {
-        const stream = await resolveStream(track.videoId, (client) => {
+        const stream = await resolveStreamCached(track.videoId, (client) => {
           if (token === loadToken.current) setResolving(client)
         })
         if (token !== loadToken.current) return
         audioEngine.load(stream.url)
         await audioEngine.play()
         await audioEngine.connectAnalyser()
+        setLoaded(true)
         setResolving(null)
         const l = await lyricsPromise
         if (token === loadToken.current) setLyrics(l)
@@ -141,6 +190,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (token !== loadToken.current) return
         setResolving(null)
         setPlaying(false)
+        setLoaded(false)
         void lyricsPromise
         setError(e?.message ?? "Could not play this track")
       }
@@ -158,7 +208,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const playNow = useCallback(
     (track: Track) => {
-      // Put the track at the head of the queue and play it.
       setQueue((q) => {
         const next = [track, ...q.filter((t) => t.videoId !== track.videoId)]
         void loadIndex(next, 0)
@@ -200,12 +249,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const togglePlay = useCallback(() => {
     if (current == null) return
+    if (!audioEngine.el.src || !loaded) {
+      // restored after refresh: re-resolve a fresh stream for this track
+      void loadIndex(queue, index)
+      return
+    }
     if (audioEngine.state.playing) {
       audioEngine.pause()
     } else {
       void audioEngine.play()
     }
-  }, [current])
+  }, [current, loaded, queue, index, loadIndex])
 
   const next = useCallback(() => {
     if (index + 1 < queue.length) void loadIndex(queue, index + 1)
@@ -226,29 +280,131 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const setVolume = useCallback((v: number) => {
     setVolumeState(v)
     audioEngine.el.volume = v
+    localStorage.setItem(VOLUME_KEY, String(v))
   }, [])
 
+  const toggleLike = useCallback((track: Track) => {
+    setLiked((prev) => {
+      const isL = prev.some((t) => t.videoId === track.videoId)
+      const next = isL
+        ? prev.filter((t) => t.videoId !== track.videoId)
+        : [track, ...prev]
+      saveJSON(LIKED_KEY, next)
+      return next
+    })
+  }, [])
+
+  const likedIds = useMemo(() => new Set(liked.map((t) => t.videoId)), [liked])
+  const isLiked = useCallback((videoId: string) => likedIds.has(videoId), [likedIds])
+
+  const dismissError = useCallback(() => setError(null), [])
+
+  // auto-dismiss errors
+  useEffect(() => {
+    if (!error) return
+    const t = setTimeout(() => setError(null), 8000)
+    return () => clearTimeout(t)
+  }, [error])
+
+  // auto-advance + preload the next track halfway through this one
   useEffect(() => {
     const el = audioEngine.el
     const onEnded = () => {
       if (index + 1 < queue.length) void loadIndex(queue, index + 1)
     }
+    const onProgress = () => {
+      const nxt = queue[index + 1]
+      if (
+        nxt &&
+        el.duration > 0 &&
+        el.currentTime / el.duration > 0.5 &&
+        preloaded.current !== nxt.videoId
+      ) {
+        preloaded.current = nxt.videoId
+        prefetchStream(nxt.videoId)
+      }
+    }
     el.addEventListener("ended", onEnded)
-    return () => el.removeEventListener("ended", onEnded)
+    el.addEventListener("timeupdate", onProgress)
+    return () => {
+      el.removeEventListener("ended", onEnded)
+      el.removeEventListener("timeupdate", onProgress)
+    }
   }, [index, queue, loadIndex])
+
+  // dead-stream recovery: a cached/prefetched URL can expire or belong to a
+  // gated fallback; invalidate it and re-resolve the same track exactly once.
+  const mediaRetried = useRef<string | null>(null)
+  useEffect(() => {
+    audioEngine.onMediaError = (src) => {
+      const track = current
+      if (!track || mediaRetried.current === track.videoId) return
+      try {
+        if (new URL(src).searchParams.get("videoId") !== track.videoId && !src.includes(track.videoId)) {
+          // stale src from a previous track; ignore
+          return
+        }
+      } catch {
+        /* malformed src */
+      }
+      mediaRetried.current = track.videoId
+      invalidateStream(track.videoId)
+      void loadIndex(queue, index)
+    }
+    return () => {
+      audioEngine.onMediaError = null
+    }
+  }, [current, queue, index, loadIndex])
+
+  // OS media session: lock-screen controls, media keys, artwork
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || !current) return
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: current.title,
+        artist: current.artist,
+        album: "Openbeats",
+        artwork: [
+          { src: current.thumbnail, sizes: "544x544", type: "image/jpeg" },
+        ],
+      })
+      navigator.mediaSession.setActionHandler("play", () => void audioEngine.play())
+      navigator.mediaSession.setActionHandler("pause", () => audioEngine.pause())
+      navigator.mediaSession.setActionHandler("previoustrack", () => prev())
+      navigator.mediaSession.setActionHandler("nexttrack", () => next())
+      navigator.mediaSession.setActionHandler("seekto", (d) => {
+        if (d.seekTime != null) audioEngine.seek(d.seekTime)
+      })
+    } catch {
+      /* not supported */
+    }
+  }, [current, prev, next])
+
+  useEffect(() => {
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = playing ? "playing" : "paused"
+    }
+  }, [playing])
+
+  // live page title
+  useEffect(() => {
+    document.title = current
+      ? `${current.title} · ${current.artist} — Openbeats`
+      : "Openbeats — free music, right in your browser"
+  }, [current])
 
   const value = useMemo(
     () => ({
       queue, index, current, playing, currentTime, duration, resolving, error,
-      recents, lyrics, lyricsLoading, volume,
+      recents, liked, lyrics, lyricsLoading, volume, loaded,
       playTracks, playTrackNext, addToQueue, removeFromQueue, jumpTo, playNow,
-      togglePlay, next, prev, seek, setVolume,
+      togglePlay, next, prev, seek, setVolume, toggleLike, isLiked, dismissError,
     }),
     [
       queue, index, current, playing, currentTime, duration, resolving, error,
-      recents, lyrics, lyricsLoading, volume, playTracks, playTrackNext,
-      addToQueue, removeFromQueue, jumpTo, playNow, togglePlay, next, prev,
-      seek, setVolume,
+      recents, liked, lyrics, lyricsLoading, volume, loaded, playTracks,
+      playTrackNext, addToQueue, removeFromQueue, jumpTo, playNow, togglePlay,
+      next, prev, seek, setVolume, toggleLike, isLiked, dismissError,
     ],
   )
 

@@ -15,6 +15,8 @@ type Listener = () => void
 
 class AudioEngine {
   el: HTMLAudioElement
+  /** Invoked when the element fails after the built-in crossOrigin retry. */
+  onMediaError: ((src: string) => void) | null = null
   ctx: AudioContext | null = null
   analyser: AnalyserNode | null = null
   private source: MediaElementAudioSourceNode | null = null
@@ -44,6 +46,10 @@ class AudioEngine {
           },
           { once: true },
         )
+      } else if (this.onMediaError && this.el.src) {
+        // Still failing without CORS mode: the stream URL itself is dead
+        // (expired cache entry, gated fallback). Let the store re-resolve.
+        this.onMediaError(this.el.src)
       }
       this.emit()
     })

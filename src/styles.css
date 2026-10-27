@@ -240,6 +240,12 @@ input:focus-visible {
   display: none;
 }
 
+/* glass children have overflow:hidden, which would let flexbox squash them;
+   the main column must scroll instead */
+.main > * {
+  flex-shrink: 0;
+}
+
 .top {
   display: flex;
   gap: 14px;
@@ -262,14 +268,15 @@ input:focus-visible {
   flex: 1;
   background: none;
   border: 0;
-  color: inherit;
-  font: inherit;
+  color: var(--ink);
+  font: 500 15px/1.4 var(--body);
   outline-offset: 6px;
   min-width: 0;
 }
 
 .search input::placeholder {
-  color: var(--mute);
+  color: rgba(var(--rgb), 0.78);
+  font-weight: 400;
 }
 
 .search .go {
@@ -330,7 +337,8 @@ input:focus-visible {
   padding: 10px 14px;
   border-radius: 16px;
   font-size: 14px;
-  color: var(--mute);
+  font-weight: 500;
+  color: rgba(var(--rgb), 0.8);
   transition: background 0.15s, color 0.15s;
 }
 
@@ -849,6 +857,14 @@ input:focus-visible {
   justify-content: flex-end;
   gap: 8px;
   align-items: center;
+}
+
+.ic.liked {
+  color: #ff5c7a;
+}
+
+.ic.liked svg {
+  fill: currentColor;
 }
 
 .vol {

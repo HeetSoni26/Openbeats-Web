@@ -330,8 +330,9 @@ function TrackCard({
 export default function App() {
   const {
     current, playing, togglePlay, next, prev, currentTime, duration, seek,
-    resolving, error, recents, queue, index, jumpTo, removeFromQueue,
+    resolving, error, recents, liked, queue, index, jumpTo, removeFromQueue,
     playTracks, playNow, setVolume, volume, lyrics, lyricsLoading,
+    toggleLike, isLiked, dismissError,
   } = usePlayer()
 
   const [results, setResults] = useState<Track[] | null>(null)
@@ -367,10 +368,14 @@ export default function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") setLyricsOpen(false)
-      if (e.code === "Space" && !["INPUT", "BUTTON", "TEXTAREA"].includes((e.target as HTMLElement).tagName)) {
+      const typing = ["INPUT", "TEXTAREA"].includes((e.target as HTMLElement).tagName)
+      if (typing) return
+      if (e.code === "Space" && !(e.target as HTMLElement).matches("button")) {
         e.preventDefault()
         togglePlay()
       }
+      if (e.key === "ArrowRight" && !e.altKey) seek(Math.min(currentTime + 5, duration))
+      if (e.key === "ArrowLeft" && !e.altKey) seek(Math.max(currentTime - 5, 0))
     }
     document.addEventListener("keydown", handler)
     return () => document.removeEventListener("keydown", handler)
@@ -505,6 +510,17 @@ export default function App() {
             </section>
           )}
 
+          {liked.length > 0 && (
+            <section className="glass pad">
+              <h2>Liked songs</h2>
+              <div className="cards">
+                {liked.map((t) => (
+                  <TrackCard key={t.videoId} track={t} onPlay={() => playNow(t)} />
+                ))}
+              </div>
+            </section>
+          )}
+
           <div className="sh">
             <section className="glass pad" id="jump">
               <h2>Jump back in</h2>
@@ -621,6 +637,15 @@ export default function App() {
             </div>
           </div>
           <div className="right">
+            <button
+              className={`ic${current && isLiked(current.videoId) ? " liked" : ""}`}
+              onClick={() => current && toggleLike(current)}
+              aria-label={current && isLiked(current.videoId) ? "Unlike" : "Like"}
+            >
+              <svg viewBox="0 0 24 24">
+                <path d="M12 21s-7.5-4.7-10-9.3C.4 8.6 2.4 5 5.9 5c2 0 3.4 1.1 4.1 2.3h4c.7-1.2 2.1-2.3 4.1-2.3 3.5 0 5.5 3.6 3.9 6.7C19.5 16.3 12 21 12 21z" transform="scale(.92) translate(1 1)" />
+              </svg>
+            </button>
             <input
               className="vol"
               type="range"
@@ -693,6 +718,8 @@ export default function App() {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
+            onClick={dismissError}
+            title="Dismiss"
           >
             {error}
           </motion.div>

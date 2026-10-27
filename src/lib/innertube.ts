@@ -140,6 +140,7 @@ export async function innertubePost(
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(12000),
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const json = await res.json()
@@ -155,6 +156,7 @@ export async function innertubePost(
         version: client.clientVersion,
         userAgent: client.userAgent,
       } : null }),
+      signal: AbortSignal.timeout(15000),
     })
     if (!res.ok) throw directError
     const json = await res.json()
@@ -314,6 +316,33 @@ function pickAudioFormat(data: PlayerResponse): StreamResult | null {
     contentLength: Number(best.contentLength ?? 0),
     client: "",
   }
+}
+
+/**
+ * resolveStream with a short-lived cache: pre-resolving the next track makes
+ * switching feel gapless. googlevideo URLs expire in minutes, so entries
+ * live for 4.
+ */
+const streamCache = new Map<string, { result: StreamResult; at: number }>()
+const STREAM_TTL = 4 * 60 * 1000
+
+export async function resolveStreamCached(
+  videoId: string,
+  onProgress?: (client: string) => void,
+): Promise<StreamResult> {
+  const hit = streamCache.get(videoId)
+  if (hit && Date.now() - hit.at < STREAM_TTL) return hit.result
+  const result = await resolveStream(videoId, onProgress)
+  streamCache.set(videoId, { result, at: Date.now() })
+  return result
+}
+
+export function prefetchStream(videoId: string) {
+  void resolveStreamCached(videoId).catch(() => {})
+}
+
+export function invalidateStream(videoId: string) {
+  streamCache.delete(videoId)
 }
 
 /**
