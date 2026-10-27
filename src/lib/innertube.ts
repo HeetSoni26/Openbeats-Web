@@ -37,8 +37,10 @@ interface InnertubeClient {
 }
 
 // Same client chain philosophy as the Android app: try the clients that
-// currently serve complete streams, best-first. Web clients are last
-// (they may need a PO token; app-client emulation usually succeeds first).
+// currently serve complete streams, best-first. The IOS client is excluded:
+// verified live, its stream URLs consistently fail in browser media
+// elements (error 4) while ANDROID_VR URLs play. WEB_REMIX stays last as a
+// no-token fallback.
 const PLAYER_CLIENTS: InnertubeClient[] = [
   {
     name: "ANDROID_VR",
@@ -51,19 +53,6 @@ const PLAYER_CLIENTS: InnertubeClient[] = [
     },
     userAgent:
       "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-  },
-  {
-    name: "IOS",
-    clientVersion: "20.10.4",
-    extra: {
-      deviceMake: "Apple",
-      deviceModel: "iPhone16,2",
-      osName: "iPhone",
-      osVersion: "18.5.0.22F76",
-      platform: "MOBILE",
-    },
-    userAgent:
-      "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_5_0 like Mac OS X;)",
   },
   {
     name: "WEB_REMIX",
@@ -196,12 +185,22 @@ function bestThumbnail(renderers: any): string {
   return best?.url ?? ""
 }
 
-export async function searchTracks(query: string): Promise<Track[]> {
-  // Songs-filter params constant (same as the Android app's FILTER_SONG).
+export type SearchFilter = "songs" | "videos"
+
+// Exact filter params from the Android app's YouTube.kt SearchFilter.
+const SEARCH_PARAMS: Record<SearchFilter, string> = {
+  songs: "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D",
+  videos: "EgWKAQIQAWoKEAkQChAFEAMQBA%3D%3D",
+}
+
+export async function searchTracks(
+  query: string,
+  filter: SearchFilter = "songs",
+): Promise<Track[]> {
   const data = await innertubePost("search", {
     context: clientContext(PLAYER_CLIENTS[3]),
     query,
-    params: "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D",
+    params: SEARCH_PARAMS[filter],
   })
 
   const tracks: Track[] = []

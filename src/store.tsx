@@ -22,6 +22,23 @@ const RECENTS_KEY = "ob-recents"
 const LIKED_KEY = "ob-liked"
 const VOLUME_KEY = "ob-volume"
 const QUEUE_KEY = "ob-queue"
+const HISTORY_KEY = "ob-history"
+const PLAYLISTS_KEY = "ob-playlists"
+const SPEED_KEY = "ob-speed"
+
+export interface HistoryEntry {
+  track: Track
+  playedAt: number
+}
+
+export interface Playlist {
+  id: string
+  name: string
+  tracks: Track[]
+  createdAt: number
+}
+
+export type SleepMode = { kind: "off" } | { kind: "time"; at: number } | { kind: "end" }
 
 function loadJSON<T>(key: string, fallback: T): T {
   try {
@@ -56,6 +73,14 @@ function loadQueue(): { queue: Track[]; index: number } {
   }
 }
 
+function loadHistory(): HistoryEntry[] {
+  return loadJSON<HistoryEntry[]>(HISTORY_KEY, [])
+}
+
+function loadPlaylists(): Playlist[] {
+  return loadJSON<Playlist[]>(PLAYLISTS_KEY, [])
+}
+
 interface PlayerState {
   queue: Track[]
   index: number
@@ -71,6 +96,10 @@ interface PlayerState {
   lyricsLoading: boolean
   volume: number
   loaded: boolean // true once the current queue entry has a live stream
+  history: HistoryEntry[]
+  playlists: Playlist[]
+  sleep: SleepMode
+  speed: number
 }
 
 interface PlayerActions {
@@ -88,6 +117,14 @@ interface PlayerActions {
   toggleLike: (track: Track) => void
   isLiked: (videoId: string) => boolean
   dismissError: () => void
+  createPlaylist: (name: string) => string
+  deletePlaylist: (id: string) => void
+  renamePlaylist: (id: string, name: string) => void
+  addToPlaylist: (playlistId: string, track: Track) => void
+  removeFromPlaylist: (playlistId: string, videoId: string) => void
+  clearHistory: () => void
+  setSleepTimer: (mode: SleepMode) => void
+  setSpeed: (v: number) => void
 }
 
 const PlayerContext = createContext<(PlayerState & PlayerActions) | null>(null)
@@ -110,15 +147,31 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.7
   })
   const [loaded, setLoaded] = useState(false)
+  const [history, setHistory] = useState<HistoryEntry[]>(loadHistory)
+  const [playlists, setPlaylists] = useState<Playlist[]>(loadPlaylists)
+  const [sleep, setSleep] = useState<SleepMode>({ kind: "off" })
+  const [speed, setSpeedState] = useState(() => {
+    const v = Number(localStorage.getItem(SPEED_KEY) ?? "1")
+    return [0.75, 1, 1.25, 1.5, 2].includes(v) ? v : 1
+  })
 
   const current = index >= 0 && index < queue.length ? queue[index] : null
   const loadToken = useRef(0)
   const preloaded = useRef<string | null>(null)
+  const sleepRef = useRef<SleepMode>({ kind: "off" })
+  sleepRef.current = sleep
 
-  // restore volume on the element
+  // restore volume + speed on the element
   useEffect(() => {
     audioEngine.el.volume = volume
+    audioEngine.el.playbackRate = speed
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const setSpeed = useCallback((v: number) => {
+    setSpeedState(v)
+    audioEngine.el.playbackRate = v
+    localStorage.setItem(SPEED_KEY, String(v))
   }, [])
 
   useEffect(
@@ -161,6 +214,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setRecents((prev) => {
         const next = [track, ...prev.filter((t) => t.videoId !== track.videoId)].slice(0, 14)
         saveJSON(RECENTS_KEY, next)
+        return next
+      })
+
+      setHistory((prev) => {
+        const next = [{ track, playedAt: Date.now() }, ...prev].slice(0, 120)
+        saveJSON(HISTORY_KEY, next)
         return next
       })
 
@@ -299,6 +358,78 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const dismissError = useCallback(() => setError(null), [])
 
+  const createPlaylist = useCallback((name: string) => {
+    const pl: Playlist = {
+      id: `pl_${Date.now().toString(36)}`,
+      name: name.trim() || "New playlist",
+      tracks: [],
+      createdAt: Date.now(),
+    }
+    setPlaylists((prev) => {
+      const next = [pl, ...prev]
+      saveJSON(PLAYLISTS_KEY, next)
+      return next
+    })
+    return pl.id
+  }, [])
+
+  const deletePlaylist = useCallback((id: string) => {
+    setPlaylists((prev) => {
+      const next = prev.filter((p) => p.id !== id)
+      saveJSON(PLAYLISTS_KEY, next)
+      return next
+    })
+  }, [])
+
+  const renamePlaylist = useCallback((id: string, name: string) => {
+    setPlaylists((prev) => {
+      const next = prev.map((p) => (p.id === id ? { ...p, name } : p))
+      saveJSON(PLAYLISTS_KEY, next)
+      return next
+    })
+  }, [])
+
+  const addToPlaylist = useCallback((playlistId: string, track: Track) => {
+    setPlaylists((prev) => {
+      const next = prev.map((p) =>
+        p.id === playlistId && !p.tracks.some((t) => t.videoId === track.videoId)
+          ? { ...p, tracks: [...p.tracks, track] }
+          : p,
+      )
+      saveJSON(PLAYLISTS_KEY, next)
+      return next
+    })
+  }, [])
+
+  const removeFromPlaylist = useCallback((playlistId: string, videoId: string) => {
+    setPlaylists((prev) => {
+      const next = prev.map((p) =>
+        p.id === playlistId ? { ...p, tracks: p.tracks.filter((t) => t.videoId !== videoId) } : p,
+      )
+      saveJSON(PLAYLISTS_KEY, next)
+      return next
+    })
+  }, [])
+
+  const clearHistory = useCallback(() => {
+    setHistory([])
+    saveJSON(HISTORY_KEY, [])
+  }, [])
+
+  const setSleepTimer = useCallback((mode: SleepMode) => setSleep(mode), [])
+
+  // sleep timer tick
+  useEffect(() => {
+    if (sleep.kind !== "time") return
+    const t = setInterval(() => {
+      if (Date.now() >= (sleep as { kind: "time"; at: number }).at) {
+        audioEngine.pause()
+        setSleep({ kind: "off" })
+      }
+    }, 1000)
+    return () => clearInterval(t)
+  }, [sleep])
+
   // auto-dismiss errors
   useEffect(() => {
     if (!error) return
@@ -310,6 +441,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const el = audioEngine.el
     const onEnded = () => {
+      if (sleepRef.current.kind === "end") {
+        audioEngine.pause()
+        setSleep({ kind: "off" })
+        return
+      }
       if (index + 1 < queue.length) void loadIndex(queue, index + 1)
     }
     const onProgress = () => {
@@ -396,15 +532,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const value = useMemo(
     () => ({
       queue, index, current, playing, currentTime, duration, resolving, error,
-      recents, liked, lyrics, lyricsLoading, volume, loaded,
+      recents, liked, lyrics, lyricsLoading, volume, loaded, history, playlists,
+      sleep, speed,
       playTracks, playTrackNext, addToQueue, removeFromQueue, jumpTo, playNow,
       togglePlay, next, prev, seek, setVolume, toggleLike, isLiked, dismissError,
+      createPlaylist, deletePlaylist, renamePlaylist, addToPlaylist,
+      removeFromPlaylist, clearHistory, setSleepTimer, setSpeed,
     }),
     [
       queue, index, current, playing, currentTime, duration, resolving, error,
-      recents, liked, lyrics, lyricsLoading, volume, loaded, playTracks,
-      playTrackNext, addToQueue, removeFromQueue, jumpTo, playNow, togglePlay,
-      next, prev, seek, setVolume, toggleLike, isLiked, dismissError,
+      recents, liked, lyrics, lyricsLoading, volume, loaded, history, playlists,
+      sleep, speed, playTracks, playTrackNext, addToQueue, removeFromQueue,
+      jumpTo, playNow, togglePlay, next, prev, seek, setVolume, toggleLike,
+      isLiked, dismissError, createPlaylist, deletePlaylist, renamePlaylist,
+      addToPlaylist, removeFromPlaylist, clearHistory, setSleepTimer, setSpeed,
     ],
   )
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { AnimatePresence, motion } from "framer-motion"
 import { audioEngine } from "./lib/audioEngine"
-import { searchSuggestions, searchTracks, type Track } from "./lib/innertube"
+import { searchSuggestions, searchTracks, type SearchFilter, type Track } from "./lib/innertube"
 import { usePlayer } from "./store"
 
 /* ---------------------------------- utils ---------------------------------- */
@@ -165,8 +165,10 @@ function ThemeToggle() {
 
 function SearchTop({
   onResults,
+  filter,
 }: {
   onResults: (tracks: Track[] | null, query: string) => void
+  filter: SearchFilter
 }) {
   const [value, setValue] = useState("")
   const [suggestions, setSuggestions] = useState<string[]>([])
@@ -199,14 +201,14 @@ function SearchTop({
       setOpen(false)
       setBusy(true)
       try {
-        onResults(await searchTracks(query), query)
+        onResults(await searchTracks(query, filter), query)
       } catch {
         onResults(null, query)
       } finally {
         setBusy(false)
       }
     },
-    [busy, onResults],
+    [busy, onResults, filter],
   )
 
   return (
@@ -287,8 +289,10 @@ function TrackCard({
   onPlay: () => void
   queueNote?: string
 }) {
-  const { playTrackNext, addToQueue, current } = usePlayer()
+  const { playTrackNext, addToQueue, current, playlists, createPlaylist, addToPlaylist } =
+    usePlayer()
   const active = current?.videoId === track.videoId
+  const [plOpen, setPlOpen] = useState(false)
   return (
     <motion.button
       layout
@@ -311,17 +315,127 @@ function TrackCard({
         {queueNote ? ` · ${queueNote}` : ""}
       </small>
       <div className="acts" onClick={(e) => e.stopPropagation()}>
-        <button
-          onClick={() => playTrackNext(track)}
-          title="Play next"
-        >
+        <button onClick={() => playTrackNext(track)} title="Play next">
           Play next
         </button>
         <button onClick={() => addToQueue(track)} title="Add to queue">
           Queue
         </button>
+        <button onClick={() => setPlOpen((v) => !v)} title="Save to playlist">
+          Save
+        </button>
+        {plOpen && (
+          <div className="glass pl-pop">
+            {playlists.map((pl) => (
+              <button
+                key={pl.id}
+                className="suggest-item"
+                onClick={() => {
+                  addToPlaylist(pl.id, track)
+                  setPlOpen(false)
+                }}
+              >
+                {pl.name}
+              </button>
+            ))}
+            <button
+              className="suggest-item new"
+              onClick={() => {
+                const id = createPlaylist("My playlist")
+                addToPlaylist(id, track)
+                setPlOpen(false)
+              }}
+            >
+              + New playlist
+            </button>
+          </div>
+        )}
       </div>
     </motion.button>
+  )
+}
+
+function PlaylistRow({
+  pl,
+  onPlay,
+  onDelete,
+  onRemoveTrack,
+}: {
+  pl: import("./store").Playlist
+  onPlay: () => void
+  onDelete: () => void
+  onRemoveTrack: (videoId: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="pl">
+      <div className="q" onClick={() => setOpen((v) => !v)}>
+        <div className="cardart pl-art">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M4 6h16M4 12h16M4 18h10" />
+          </svg>
+        </div>
+        <div>
+          <b>{pl.name}</b>
+          <small>
+            {pl.tracks.length} {pl.tracks.length === 1 ? "song" : "songs"}
+          </small>
+        </div>
+        <button
+          className="qx"
+          aria-label="Play playlist"
+          onClick={(e) => {
+            e.stopPropagation()
+            onPlay()
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M8 5v14l11-7z" />
+          </svg>
+        </button>
+        <button
+          className="qx"
+          aria-label="Delete playlist"
+          onClick={(e) => {
+            e.stopPropagation()
+            onDelete()
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+      {open && (
+        <div className="pl-tracks">
+          {pl.tracks.length ? (
+            pl.tracks.map((t) => (
+              <div key={t.videoId} className="q" onClick={() => onPlay()}>
+                <div className="cardart" style={artStyle(t)} />
+                <div>
+                  <b>{t.title}</b>
+                  <small>{t.artist}</small>
+                </div>
+                <button
+                  className="qx"
+                  aria-label="Remove from playlist"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    onRemoveTrack(t.videoId)
+                  }}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            ))
+          ) : (
+            <div className="empty">Empty — add songs from any card's "Save" action.</div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -333,10 +447,14 @@ export default function App() {
     resolving, error, recents, liked, queue, index, jumpTo, removeFromQueue,
     playTracks, playNow, setVolume, volume, lyrics, lyricsLoading,
     toggleLike, isLiked, dismissError,
+    history, playlists, sleep, speed,
+    deletePlaylist, removeFromPlaylist,
+    clearHistory, setSleepTimer, setSpeed,
   } = usePlayer()
 
   const [results, setResults] = useState<Track[] | null>(null)
   const [resultQuery, setResultQuery] = useState("")
+  const [searchFilter, setSearchFilter] = useState<SearchFilter>("songs")
   const [lyricsOpen, setLyricsOpen] = useState(false)
   const stageRef = useBeatEngine(playing)
   const mainRef = useRef<HTMLElement>(null)
@@ -382,6 +500,27 @@ export default function App() {
   }, [togglePlay])
 
   const progress = duration > 0 ? currentTime / duration : 0
+
+  const cycleSleep = () => {
+    if (sleep.kind === "off") setSleepTimer({ kind: "time", at: Date.now() + 15 * 60 * 1000 })
+    else if (sleep.kind === "time") {
+      const minsLeft = Math.max(1, Math.round(((sleep.at - Date.now()) / 60000)))
+      if (minsLeft >= 60) setSleepTimer({ kind: "end" })
+      else setSleepTimer({ kind: "time", at: Date.now() + (minsLeft + 15) * 60 * 1000 })
+    } else setSleepTimer({ kind: "off" })
+  }
+
+  const sleepLabel =
+    sleep.kind === "time"
+      ? fmt((sleep.at - Date.now()) / 1000)
+      : sleep.kind === "end"
+        ? "track"
+        : ""
+
+  const cycleSpeed = () => {
+    const steps = [1, 1.25, 1.5, 2, 0.75]
+    setSpeed(steps[(steps.indexOf(speed) + 1) % steps.length])
+  }
   const lyr = lyrics
 
   // active lyric line + word progress
@@ -449,7 +588,7 @@ export default function App() {
         </nav>
 
         <main className="main" ref={mainRef}>
-          <SearchTop onResults={onResults} />
+          <SearchTop onResults={onResults} filter={searchFilter} />
 
           <section className="glass hero">
             <div>
@@ -490,7 +629,23 @@ export default function App() {
 
           {results && (
             <section className="glass pad">
-              <h2>{results.length ? `Results · ${resultQuery}` : `Results · ${resultQuery}`}</h2>
+              <div className="section-head">
+                <h2>Results · {resultQuery}</h2>
+                <div className="tabs">
+                  {(["songs", "videos"] as SearchFilter[]).map((f) => (
+                    <button
+                      key={f}
+                      className={`tab${searchFilter === f ? " on" : ""}`}
+                      onClick={() => {
+                        setSearchFilter(f)
+                        void searchTracks(resultQuery, f).then((r) => setResults(r)).catch(() => setResults([]))
+                      }}
+                    >
+                      {f === "songs" ? "Songs" : "Videos"}
+                    </button>
+                  ))}
+                </div>
+              </div>
               {results.length ? (
                 <div className="cards">
                   {results.map((t) => (
@@ -577,6 +732,59 @@ export default function App() {
               )}
             </section>
           </div>
+
+          {playlists.length > 0 && (
+            <section className="glass pad">
+              <h2>Your playlists</h2>
+              <div className="pl-list">
+                {playlists.map((pl) => (
+                  <PlaylistRow
+                    key={pl.id}
+                    pl={pl}
+                    onPlay={() => pl.tracks.length && playTracks(pl.tracks, 0)}
+                    onDelete={() => deletePlaylist(pl.id)}
+                    onRemoveTrack={(videoId) => removeFromPlaylist(pl.id, videoId)}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section className="glass pad">
+            <div className="section-head">
+              <h2>History</h2>
+              {history.length > 0 && (
+                <button className="qx-wide" onClick={clearHistory}>
+                  Clear
+                </button>
+              )}
+            </div>
+            {history.length ? (
+              history.slice(0, 12).map((entry, i) => (
+                <div
+                  key={entry.track.videoId + entry.playedAt + i}
+                  className="q"
+                  onClick={() => playNow(entry.track)}
+                >
+                  <div className="cardart" style={artStyle(entry.track)}>
+                    <div className="cardplay">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M8 5v14l11-7z" fill="currentColor" />
+                      </svg>
+                    </div>
+                  </div>
+                  <div>
+                    <b>{entry.track.title}</b>
+                    <small>
+                      {entry.track.artist} · {new Date(entry.playedAt).toLocaleDateString()}
+                    </small>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="empty">Songs you play are logged here — on this device only.</div>
+            )}
+          </section>
         </main>
       </div>
 
@@ -637,6 +845,19 @@ export default function App() {
             </div>
           </div>
           <div className="right">
+            <button
+              className={`ic${sleep.kind !== "off" ? " liked" : ""}`}
+              onClick={cycleSleep}
+              aria-label="Sleep timer"
+              title={sleep.kind === "off" ? "Sleep timer" : `Sleep: ${sleepLabel}`}
+            >
+              <svg viewBox="0 0 24 24">
+                <path d="M20 14.5A8 8 0 019.5 4 8 8 0 1020 14.5z" />
+              </svg>
+            </button>
+            <button className="ic speed" onClick={cycleSpeed} aria-label="Playback speed" title="Playback speed">
+              {speed}×
+            </button>
             <button
               className={`ic${current && isLiked(current.videoId) ? " liked" : ""}`}
               onClick={() => current && toggleLike(current)}
