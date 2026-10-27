@@ -1,6 +1,6 @@
 /*
  * Openbeats Web — player store. React context over a single audio engine
- * instance; queue + resolution state live here.
+ * instance; queue, recents, lyrics and resolution state live here.
  */
 
 import {
@@ -14,8 +14,27 @@ import {
   type ReactNode,
 } from "react"
 import { audioEngine } from "./lib/audioEngine"
-import { extractPalette, type Palette } from "./lib/colors"
+import { fetchLyrics, type Lyrics } from "./lib/lyrics"
 import { resolveStream, type Track } from "./lib/innertube"
+
+const RECENTS_KEY = "ob-recents"
+
+function loadRecents(): Track[] {
+  try {
+    const raw = localStorage.getItem(RECENTS_KEY)
+    return raw ? (JSON.parse(raw) as Track[]) : []
+  } catch {
+    return []
+  }
+}
+
+function saveRecents(tracks: Track[]) {
+  try {
+    localStorage.setItem(RECENTS_KEY, JSON.stringify(tracks.slice(0, 14)))
+  } catch {
+    /* private mode */
+  }
+}
 
 interface PlayerState {
   queue: Track[]
@@ -24,11 +43,12 @@ interface PlayerState {
   playing: boolean
   currentTime: number
   duration: number
-  resolving: string | null // client name being tried, or "searching"
+  resolving: string | null
   error: string | null
-  expanded: boolean
-  palette: Palette
-  analyserReady: boolean
+  recents: Track[]
+  lyrics: Lyrics | null
+  lyricsLoading: boolean
+  volume: number
 }
 
 interface PlayerActions {
@@ -37,11 +57,12 @@ interface PlayerActions {
   addToQueue: (track: Track) => void
   removeFromQueue: (index: number) => void
   jumpTo: (index: number) => void
+  playNow: (track: Track) => void
   togglePlay: () => void
   next: () => void
   prev: () => void
   seek: (t: number) => void
-  setExpanded: (v: boolean) => void
+  setVolume: (v: number) => void
 }
 
 const PlayerContext = createContext<(PlayerState & PlayerActions) | null>(null)
@@ -54,14 +75,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [duration, setDuration] = useState(0)
   const [resolving, setResolving] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [expanded, setExpanded] = useState(false)
-  const [palette, setPalette] = useState<Palette>({ primary: "#7c5cff", soft: "#181528" })
-  const [analyserReady, setAnalyserReady] = useState(false)
+  const [recents, setRecents] = useState<Track[]>(loadRecents)
+  const [lyrics, setLyrics] = useState<Lyrics | null>(null)
+  const [lyricsLoading, setLyricsLoading] = useState(false)
+  const [volume, setVolumeState] = useState(0.7)
 
   const current = index >= 0 && index < queue.length ? queue[index] : null
   const loadToken = useRef(0)
 
-  // Mirror engine state into React.
   useEffect(
     () => {
       const unsub = audioEngine.subscribe(() => {
@@ -77,7 +98,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [],
   )
 
-  // Load + play a queue index: resolve stream through the client chain.
   const loadIndex = useCallback(
     async (q: Track[], i: number) => {
       const track = q[i]
@@ -88,12 +108,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setIndex(i)
       setCurrentTime(0)
       setDuration(0)
+      setLyrics(null)
 
-      extractPalette(track.thumbnail).then((p) => {
-        setPalette(p)
-        const root = document.documentElement
-        root.style.setProperty("--accent", p.primary)
-        root.style.setProperty("--accent-soft", p.soft)
+      setRecents((prev) => {
+        const next = [track, ...prev.filter((t) => t.videoId !== track.videoId)].slice(0, 14)
+        saveRecents(next)
+        return next
+      })
+
+      // lyrics load in parallel with stream resolution
+      setLyricsLoading(true)
+      const lyricsPromise = fetchLyrics(
+        track.title.replace(/\s*\((official|lyrics|audio|video|hd|4k)[^)]*\)/gi, ""),
+        track.artist,
+        0,
+      ).finally(() => {
+        if (token === loadToken.current) setLyricsLoading(false)
       })
 
       try {
@@ -103,13 +133,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (token !== loadToken.current) return
         audioEngine.load(stream.url)
         await audioEngine.play()
-        const analyser = await audioEngine.connectAnalyser()
-        setAnalyserReady(!!analyser)
+        await audioEngine.connectAnalyser()
         setResolving(null)
+        const l = await lyricsPromise
+        if (token === loadToken.current) setLyrics(l)
       } catch (e: any) {
         if (token !== loadToken.current) return
         setResolving(null)
         setPlaying(false)
+        void lyricsPromise
         setError(e?.message ?? "Could not play this track")
       }
     },
@@ -124,6 +156,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [loadIndex],
   )
 
+  const playNow = useCallback(
+    (track: Track) => {
+      // Put the track at the head of the queue and play it.
+      setQueue((q) => {
+        const next = [track, ...q.filter((t) => t.videoId !== track.videoId)]
+        void loadIndex(next, 0)
+        return next
+      })
+    },
+    [loadIndex],
+  )
+
   const jumpTo = useCallback(
     (i: number) => {
       void loadIndex(queue, i)
@@ -134,9 +178,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const playTrackNext = useCallback(
     (track: Track) => {
       setQueue((q) => {
-        const insertAt = index + 1
         const next = [...q]
-        next.splice(insertAt, 0, track)
+        next.splice(index + 1, 0, track)
         return next
       })
     },
@@ -180,7 +223,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const seek = useCallback((t: number) => audioEngine.seek(t), [])
 
-  // Auto-advance on track end.
+  const setVolume = useCallback((v: number) => {
+    setVolumeState(v)
+    audioEngine.el.volume = v
+  }, [])
+
   useEffect(() => {
     const el = audioEngine.el
     const onEnded = () => {
@@ -192,32 +239,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(
     () => ({
-      queue,
-      index,
-      current,
-      playing,
-      currentTime,
-      duration,
-      resolving,
-      error,
-      expanded,
-      palette,
-      analyserReady,
-      playTracks,
-      playTrackNext,
-      addToQueue,
-      removeFromQueue,
-      jumpTo,
-      togglePlay,
-      next,
-      prev,
-      seek,
-      setExpanded,
+      queue, index, current, playing, currentTime, duration, resolving, error,
+      recents, lyrics, lyricsLoading, volume,
+      playTracks, playTrackNext, addToQueue, removeFromQueue, jumpTo, playNow,
+      togglePlay, next, prev, seek, setVolume,
     }),
     [
       queue, index, current, playing, currentTime, duration, resolving, error,
-      expanded, palette, analyserReady, playTracks, playTrackNext, addToQueue,
-      removeFromQueue, jumpTo, togglePlay, next, prev, seek,
+      recents, lyrics, lyricsLoading, volume, playTracks, playTrackNext,
+      addToQueue, removeFromQueue, jumpTo, playNow, togglePlay, next, prev,
+      seek, setVolume,
     ],
   )
 
