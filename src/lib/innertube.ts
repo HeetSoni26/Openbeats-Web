@@ -41,6 +41,14 @@ interface InnertubeClient {
 // verified live, its stream URLs consistently fail in browser media
 // elements (error 4) while ANDROID_VR URLs play. WEB_REMIX stays last as a
 // no-token fallback.
+const WEB_CLIENT: InnertubeClient = {
+  name: "WEB_REMIX",
+  clientVersion: "1.20260114.01.00",
+  extra: { platform: "DESKTOP", originalUrl: "https://music.youtube.com/" },
+  userAgent:
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+}
+
 const PLAYER_CLIENTS: InnertubeClient[] = [
   {
     name: "ANDROID_VR",
@@ -54,13 +62,7 @@ const PLAYER_CLIENTS: InnertubeClient[] = [
     userAgent:
       "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
   },
-  {
-    name: "WEB_REMIX",
-    clientVersion: "1.20260114.01.00",
-    extra: { platform: "DESKTOP", originalUrl: "https://music.youtube.com/" },
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-  },
+  WEB_CLIENT,
 ]
 
 // Session-wide visitor identity: YouTube issues one per response and
@@ -112,7 +114,7 @@ export async function innertubePost(
     "Content-Type": "application/json",
     "X-Goog-Api-Format-Version": "1",
     "X-YouTube-Client-Name": clientNameId(client?.name ?? "WEB_REMIX"),
-    "X-YouTube-Client-Version": client?.clientVersion ?? "1.20260114.01.00",
+    "X-YouTube-Client-Version": client?.clientVersion ?? WEB_CLIENT.clientVersion,
   }
   if (client?.userAgent && !isBrowserUserAgent()) {
     // Browsers forbid setting User-Agent; harmless on direct calls.
@@ -198,7 +200,7 @@ export async function searchTracks(
   filter: SearchFilter = "songs",
 ): Promise<Track[]> {
   const data = await innertubePost("search", {
-    context: clientContext(PLAYER_CLIENTS[3]),
+    context: clientContext(WEB_CLIENT),
     query,
     params: SEARCH_PARAMS[filter],
   })

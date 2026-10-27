@@ -454,15 +454,27 @@ export default function App() {
 
   const [results, setResults] = useState<Track[] | null>(null)
   const [resultQuery, setResultQuery] = useState("")
+  const [searchError, setSearchError] = useState<string | null>(null)
   const [searchFilter, setSearchFilter] = useState<SearchFilter>("songs")
   const [lyricsOpen, setLyricsOpen] = useState(false)
   const stageRef = useBeatEngine(playing)
   const mainRef = useRef<HTMLElement>(null)
   const lyricsLinesRef = useRef<HTMLDivElement>(null)
 
+  useEffect(() => {
+    if (!searchError) return
+    const t = setTimeout(() => setSearchError(null), 8000)
+    return () => clearTimeout(t)
+  }, [searchError])
+
   const onResults = useCallback((tracks: Track[] | null, query: string) => {
     setResults(tracks)
     setResultQuery(query)
+    setSearchError(
+      tracks === null
+        ? "Search failed — YouTube may be limiting this network. Try again in a moment."
+        : null,
+    )
     if (tracks?.length && mainRef.current) {
       mainRef.current.scrollTo({ top: 320, behavior: "smooth" })
     }
@@ -933,16 +945,17 @@ export default function App() {
       </section>
 
       <AnimatePresence>
-        {error && (
+        {(error || searchError) && (
           <motion.div
             className="toast"
+            key={error ?? searchError ?? "err"}
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0 }}
             onClick={dismissError}
             title="Dismiss"
           >
-            {error}
+            {error ?? searchError}
           </motion.div>
         )}
       </AnimatePresence>
